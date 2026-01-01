@@ -443,53 +443,65 @@ class ATSTailor {
     const missingKeywords = this.generatedDocuments.missingKeywords || [];
     const totalKeywords = matchedKeywords.length + missingKeywords.length;
     
-    // Update gauge circle (SVG-safe using setAttribute)
-    const gaugeCircle = document.getElementById('matchGaugeCircle');
-    if (gaugeCircle) {
-      const circumference = 2 * Math.PI * 45; // ~283
-      const dashOffset = circumference - (matchScore / 100) * circumference;
-      gaugeCircle.setAttribute('stroke-dashoffset', dashOffset.toString());
+    // Use KeywordChips module if available for gauge update
+    if (window.KeywordChips) {
+      window.KeywordChips.updateMatchGauge(matchScore, matchedKeywords.length, totalKeywords);
+    } else {
+      // Fallback: Update gauge circle (SVG-safe using setAttribute)
+      const gaugeCircle = document.getElementById('matchGaugeCircle');
+      if (gaugeCircle) {
+        const circumference = 2 * Math.PI * 45; // ~283
+        const dashOffset = circumference - (matchScore / 100) * circumference;
+        gaugeCircle.setAttribute('stroke-dashoffset', dashOffset.toString());
+        
+        // Update color based on score
+        let strokeColor = '#ff4757'; // red < 50%
+        if (matchScore >= 90) strokeColor = '#2ed573';
+        else if (matchScore >= 70) strokeColor = '#00d4ff';
+        else if (matchScore >= 50) strokeColor = '#ffa502';
+        gaugeCircle.setAttribute('stroke', strokeColor);
+      }
       
-      // Update color based on score
-      let strokeColor = '#ff4757'; // red < 50%
-      if (matchScore >= 90) strokeColor = '#2ed573';
-      else if (matchScore >= 70) strokeColor = '#00d4ff';
-      else if (matchScore >= 50) strokeColor = '#ffa502';
-      gaugeCircle.setAttribute('stroke', strokeColor);
+      // Update percentage text
+      const matchPercentage = document.getElementById('matchPercentage');
+      if (matchPercentage) matchPercentage.textContent = `${matchScore}%`;
+      
+      // Update subtitle and badge
+      const matchSubtitle = document.getElementById('matchSubtitle');
+      const keywordCountBadge = document.getElementById('keywordCountBadge');
+      
+      if (matchSubtitle && totalKeywords > 0) {
+        matchSubtitle.textContent = matchScore >= 90 ? 'Excellent match!' : 
+                                     matchScore >= 70 ? 'Good match' : 
+                                     matchScore >= 50 ? 'Fair match - consider improvements' : 
+                                     'Needs improvement';
+      }
+      
+      if (keywordCountBadge) {
+        keywordCountBadge.textContent = `${matchedKeywords.length} of ${totalKeywords} keywords matched`;
+      }
     }
     
-    // Update percentage text
-    const matchPercentage = document.getElementById('matchPercentage');
-    if (matchPercentage) matchPercentage.textContent = `${matchScore}%`;
-    
-    // Update subtitle and badge
-    const matchSubtitle = document.getElementById('matchSubtitle');
-    const keywordCountBadge = document.getElementById('keywordCountBadge');
-    
-    if (matchSubtitle && totalKeywords > 0) {
-      matchSubtitle.textContent = matchScore >= 90 ? 'Excellent match!' : 
-                                   matchScore >= 70 ? 'Good match' : 
-                                   matchScore >= 50 ? 'Fair match - consider improvements' : 
-                                   'Needs improvement';
+    // Use KeywordChips module for chips if available
+    if (window.KeywordChips && this.generatedDocuments.keywords) {
+      const keywords = this.generatedDocuments.keywords;
+      const cvText = this.generatedDocuments.cv || '';
+      window.KeywordChips.updateAllKeywordSections(keywords, cvText);
+    } else {
+      // Fallback: Categorize keywords (roughly 40% high, 35% medium, 25% low)
+      const highCount = Math.ceil(totalKeywords * 0.4);
+      const medCount = Math.ceil(totalKeywords * 0.35);
+      
+      const allKeywords = [...matchedKeywords, ...missingKeywords];
+      const highPriority = allKeywords.slice(0, highCount);
+      const mediumPriority = allKeywords.slice(highCount, highCount + medCount);
+      const lowPriority = allKeywords.slice(highCount + medCount);
+      
+      // Update keyword chips
+      this.updateKeywordChips('highPriorityChips', 'highPriorityCount', highPriority, matchedKeywords);
+      this.updateKeywordChips('mediumPriorityChips', 'mediumPriorityCount', mediumPriority, matchedKeywords);
+      this.updateKeywordChips('lowPriorityChips', 'lowPriorityCount', lowPriority, matchedKeywords);
     }
-    
-    if (keywordCountBadge) {
-      keywordCountBadge.textContent = `${matchedKeywords.length} of ${totalKeywords} keywords matched`;
-    }
-    
-    // Categorize keywords (roughly 40% high, 35% medium, 25% low)
-    const highCount = Math.ceil(totalKeywords * 0.4);
-    const medCount = Math.ceil(totalKeywords * 0.35);
-    
-    const allKeywords = [...matchedKeywords, ...missingKeywords];
-    const highPriority = allKeywords.slice(0, highCount);
-    const mediumPriority = allKeywords.slice(highCount, highCount + medCount);
-    const lowPriority = allKeywords.slice(highCount + medCount);
-    
-    // Update keyword chips
-    this.updateKeywordChips('highPriorityChips', 'highPriorityCount', highPriority, matchedKeywords);
-    this.updateKeywordChips('mediumPriorityChips', 'mediumPriorityCount', mediumPriority, matchedKeywords);
-    this.updateKeywordChips('lowPriorityChips', 'lowPriorityCount', lowPriority, matchedKeywords);
   }
 
   updateKeywordChips(containerId, countId, keywords, matchedKeywords) {
@@ -821,8 +833,8 @@ class ATSTailor {
   }
 
   /**
-   * Boost match score using local CV tailoring
-   * Injects missing keywords to achieve 95%+ ATS match
+   * Boost match score using enhanced auto-tailor workflow
+   * Injects missing keywords to achieve 95%+ ATS match with dynamic score updates
    */
   async boostMatchScore() {
     const btn = document.getElementById('boostMatchBtn');
@@ -839,41 +851,77 @@ class ATSTailor {
       return;
     }
 
-    // Check if CVTailor is available
-    if (typeof window.CVTailor === 'undefined' || typeof window.KeywordExtractor === 'undefined') {
-      this.showToast('Tailoring modules not loaded', 'error');
-      return;
-    }
-
     const currentScore = this.generatedDocuments.matchScore || 0;
     if (currentScore >= 95) {
       this.showToast('Already at 95%+ match!', 'success');
       return;
     }
 
-    // Set loading state
-    btn.disabled = true;
-    const originalText = btn.querySelector('.btn-text')?.textContent;
-    if (btn.querySelector('.btn-text')) {
-      btn.querySelector('.btn-text').textContent = 'Boosting...';
+    // Set loading state using ButtonFixer if available
+    if (window.ButtonFixer) {
+      window.ButtonFixer.setButtonLoading(btn, true, 'Boosting...');
+    } else {
+      btn.disabled = true;
+      const textEl = btn.querySelector('.btn-text');
+      if (textEl) textEl.textContent = 'Boosting...';
+      btn.classList.add('btn-loading');
     }
-    btn.classList.add('btn-loading');
     this.setStatus('Boosting match score...', 'working');
 
     try {
-      // Extract keywords from job description
-      const keywords = window.KeywordExtractor.extractKeywords(this.currentJob.description, 35);
-      
-      if (!keywords.all || keywords.all.length === 0) {
-        throw new Error('Could not extract keywords from job description');
-      }
+      let tailorResult;
 
-      // Tailor the CV
-      const tailorResult = window.CVTailor.tailorCV(
-        this.generatedDocuments.cv,
-        keywords,
-        { targetScore: 95 }
-      );
+      // Try using AutoTailor95 module first
+      if (window.AutoTailor95) {
+        const tailor = new window.AutoTailor95({
+          onProgress: (percent, text) => {
+            console.log(`[Boost] ${percent}%: ${text}`);
+          },
+          onScoreUpdate: (score, phase) => {
+            // Animate score change in real-time
+            if (window.KeywordChips) {
+              const matched = Math.round((score / 100) * (this.generatedDocuments.matchedKeywords?.length + this.generatedDocuments.missingKeywords?.length || 0));
+              window.KeywordChips.updateMatchGauge(score, matched, this.generatedDocuments.matchedKeywords?.length + this.generatedDocuments.missingKeywords?.length || 0);
+            }
+          },
+          onChipsUpdate: (keywords, cvText, phase) => {
+            // Update chips in real-time
+            if (window.KeywordChips) {
+              window.KeywordChips.updateAllKeywordSections(keywords, cvText);
+            }
+          }
+        });
+
+        tailorResult = await tailor.autoTailorTo95Plus(
+          this.currentJob.description,
+          this.generatedDocuments.cv
+        );
+      } 
+      // Fallback to CVTailor if AutoTailor95 not available
+      else if (window.CVTailor && window.KeywordExtractor) {
+        const keywords = window.KeywordExtractor.extractKeywords(this.currentJob.description, 35);
+        
+        if (!keywords.all || keywords.all.length === 0) {
+          throw new Error('Could not extract keywords from job description');
+        }
+
+        const cvResult = window.CVTailor.tailorCV(
+          this.generatedDocuments.cv,
+          keywords,
+          { targetScore: 95 }
+        );
+
+        tailorResult = {
+          tailoredCV: cvResult.tailoredCV,
+          finalScore: cvResult.matchScore,
+          matchedKeywords: cvResult.matchedKeywords,
+          missingKeywords: cvResult.missingKeywords,
+          injectedKeywords: cvResult.injectedKeywords || [],
+          keywords: keywords
+        };
+      } else {
+        throw new Error('Tailoring modules not loaded');
+      }
 
       if (!tailorResult.tailoredCV) {
         throw new Error('Tailoring failed');
@@ -881,9 +929,10 @@ class ATSTailor {
 
       // Update documents with boosted CV
       this.generatedDocuments.cv = tailorResult.tailoredCV;
-      this.generatedDocuments.matchScore = tailorResult.matchScore;
+      this.generatedDocuments.matchScore = tailorResult.finalScore;
       this.generatedDocuments.matchedKeywords = tailorResult.matchedKeywords;
       this.generatedDocuments.missingKeywords = tailorResult.missingKeywords;
+      this.generatedDocuments.keywords = tailorResult.keywords;
       
       // Clear PDF since text has changed - user needs to regenerate
       this.generatedDocuments.cvPdf = null;
@@ -891,15 +940,23 @@ class ATSTailor {
       // Save updated documents
       await chrome.storage.local.set({ ats_lastGeneratedDocuments: this.generatedDocuments });
 
-      // Update UI
+      // Final UI update with animation
+      if (window.DynamicScore) {
+        window.DynamicScore.animateScore(currentScore, tailorResult.finalScore, (score) => {
+          const matchPercentage = document.getElementById('matchPercentage');
+          if (matchPercentage) matchPercentage.textContent = `${score}%`;
+        });
+      }
+
+      // Update all UI elements
       this.updateDocumentDisplay();
       this.updatePreviewContent();
       
-      const improvement = tailorResult.matchScore - currentScore;
-      const injectedCount = tailorResult.injectedKeywords.length;
+      const improvement = tailorResult.finalScore - currentScore;
+      const injectedCount = tailorResult.injectedKeywords?.length || 0;
 
       this.showToast(
-        `Boosted to ${tailorResult.matchScore}%! (+${improvement}%, ${injectedCount} keywords added)`, 
+        `Boosted to ${tailorResult.finalScore}%! (+${improvement}%, ${injectedCount} keywords added)`, 
         'success'
       );
       this.setStatus('Boost complete', 'ready');
@@ -907,7 +964,7 @@ class ATSTailor {
       // Log stats for debugging
       console.log('[ATS Tailor] Boost result:', {
         originalScore: currentScore,
-        newScore: tailorResult.matchScore,
+        newScore: tailorResult.finalScore,
         injectedKeywords: tailorResult.injectedKeywords,
         stats: tailorResult.stats
       });
@@ -917,11 +974,15 @@ class ATSTailor {
       this.showToast(error.message || 'Boost failed', 'error');
       this.setStatus('Error', 'error');
     } finally {
-      btn.disabled = false;
-      if (btn.querySelector('.btn-text')) {
-        btn.querySelector('.btn-text').textContent = originalText || 'Boost to 95%+';
+      // Reset button state
+      if (window.ButtonFixer) {
+        window.ButtonFixer.setButtonLoading(btn, false);
+      } else {
+        btn.disabled = false;
+        const textEl = btn.querySelector('.btn-text');
+        if (textEl) textEl.textContent = 'Boost to 95%+';
+        btn.classList.remove('btn-loading');
       }
-      btn.classList.remove('btn-loading');
     }
   }
 
