@@ -933,9 +933,9 @@ class ATSTailor {
       this.generatedDocuments.matchedKeywords = tailorResult.matchedKeywords;
       this.generatedDocuments.missingKeywords = tailorResult.missingKeywords;
       this.generatedDocuments.keywords = tailorResult.keywords;
-      
-      // Clear PDF since text has changed - user needs to regenerate
-      this.generatedDocuments.cvPdf = null;
+
+      // Auto-regenerate PDF with boosted CV and dynamic location
+      await this.regeneratePDFAfterBoost();
 
       // Save updated documents
       await chrome.storage.local.set({ ats_lastGeneratedDocuments: this.generatedDocuments });
@@ -956,7 +956,7 @@ class ATSTailor {
       const injectedCount = tailorResult.injectedKeywords?.length || 0;
 
       this.showToast(
-        `Boosted to ${tailorResult.finalScore}%! (+${improvement}%, ${injectedCount} keywords added)`, 
+        `Boosted to ${tailorResult.finalScore}%! (+${improvement}%, ${injectedCount} keywords added, PDF regenerated)`, 
         'success'
       );
       this.setStatus('Boost complete', 'ready');
@@ -983,6 +983,122 @@ class ATSTailor {
         if (textEl) textEl.textContent = 'Boost to 95%+';
         btn.classList.remove('btn-loading');
       }
+    }
+  }
+
+  /**
+   * Regenerate PDF after CV boost with dynamic location tailoring
+   * Automatically called after boostMatchScore modifies CV text
+   */
+  async regeneratePDFAfterBoost() {
+    try {
+      console.log('[ATS Tailor] Regenerating PDF after boost...');
+      
+      // Get tailored location from job data
+      let tailoredLocation = 'Open to relocation';
+      if (window.LocationTailor && this.currentJob) {
+        tailoredLocation = window.LocationTailor.extractFromJobData(this.currentJob);
+        console.log('[ATS Tailor] Tailored location:', tailoredLocation);
+      }
+
+      // Get user profile for header
+      let candidateData = {};
+      try {
+        if (this.session?.access_token && this.session?.user?.id) {
+          const profileRes = await fetch(
+            `${SUPABASE_URL}/rest/v1/profiles?user_id=eq.${this.session.user.id}&select=first_name,last_name,email,phone,linkedin,github,portfolio`,
+            {
+              headers: {
+                apikey: SUPABASE_ANON_KEY,
+                Authorization: `Bearer ${this.session.access_token}`,
+              },
+            }
+          );
+          if (profileRes.ok) {
+            const profiles = await profileRes.json();
+            candidateData = profiles?.[0] || {};
+          }
+        }
+      } catch (e) {
+        console.warn('[ATS Tailor] Could not fetch profile for PDF regeneration:', e);
+      }
+
+      // Generate new PDF using PDFATSPerfect if available
+      if (window.PDFATSPerfect) {
+        const pdfResult = await window.PDFATSPerfect.regenerateAfterBoost({
+          jobData: this.currentJob,
+          candidateData: {
+            firstName: candidateData.first_name,
+            lastName: candidateData.last_name,
+            email: candidateData.email || this.session?.user?.email,
+            phone: candidateData.phone,
+            linkedin: candidateData.linkedin,
+            github: candidateData.github,
+            portfolio: candidateData.portfolio
+          },
+          boostedCVText: this.generatedDocuments.cv,
+          currentLocation: tailoredLocation
+        });
+
+        if (pdfResult.pdf) {
+          this.generatedDocuments.cvPdf = pdfResult.pdf;
+          this.generatedDocuments.cvFileName = pdfResult.fileName;
+          this.generatedDocuments.tailoredLocation = pdfResult.location;
+          console.log('[ATS Tailor] PDF regenerated:', pdfResult.fileName);
+        } else if (pdfResult.requiresBackendGeneration) {
+          // Need to call backend for PDF generation
+          await this.regeneratePDFViaBackend(pdfResult, tailoredLocation);
+        }
+      } else {
+        // Fallback: Call backend generate-pdf function
+        await this.regeneratePDFViaBackend(null, tailoredLocation);
+      }
+    } catch (error) {
+      console.error('[ATS Tailor] PDF regeneration failed:', error);
+      // Don't throw - boost was successful, just PDF failed
+      this.generatedDocuments.cvPdf = null;
+    }
+  }
+
+  /**
+   * Regenerate PDF via Supabase edge function
+   * @param {Object} textFormat - Pre-formatted text from PDFATSPerfect
+   * @param {string} tailoredLocation - Location for CV header
+   */
+  async regeneratePDFViaBackend(textFormat, tailoredLocation) {
+    try {
+      if (!this.session?.access_token) {
+        console.warn('[ATS Tailor] No session for backend PDF generation');
+        return;
+      }
+
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/generate-pdf`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.session.access_token}`,
+          apikey: SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({
+          content: this.generatedDocuments.cv,
+          type: 'cv',
+          tailoredLocation: tailoredLocation,
+          jobTitle: this.currentJob?.title,
+          company: this.currentJob?.company,
+          fileName: textFormat?.fileName
+        }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        if (result.pdf) {
+          this.generatedDocuments.cvPdf = result.pdf;
+          this.generatedDocuments.cvFileName = result.fileName || textFormat?.fileName;
+          console.log('[ATS Tailor] PDF regenerated via backend');
+        }
+      }
+    } catch (error) {
+      console.error('[ATS Tailor] Backend PDF generation failed:', error);
     }
   }
 
