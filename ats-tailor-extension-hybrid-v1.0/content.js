@@ -1,13 +1,14 @@
-// content.js - HYBRID v1.0.0 - LazyApply 3X ULTRA-FAST Speed (≤175ms) + ALL 5.0 Features
+// content.js - HYBRID v1.1.0 - LazyApply 3X ULTRA-FAST Speed (≤175ms) + ALL 5.0 Features
 // MERGE: 4.0's proven file attach logic + 5.0's keyword extraction, tailoring, PDF generation
 // SPEED: 50% faster - 350ms → 175ms for LazyApply 3X compatibility
 // UNIQUE CV: Preserves user's companies/roles/dates, modifies only bullet phrasing per job
+// NEW: Auto-trigger extraction on ATS platforms + State persistence + Resume on return
 
 (function() {
   'use strict';
 
-  console.log('[ATS Tailor] HYBRID v1.0.0 LAZYAPPLY 3X ULTRA-FAST loaded on:', window.location.hostname);
-  console.log('[ATS Tailor] Features: 175ms speed + Unique CV per job + ALL 5.0 features');
+  console.log('[ATS Tailor] HYBRID v1.1.0 LAZYAPPLY 3X ULTRA-FAST loaded on:', window.location.hostname);
+  console.log('[ATS Tailor] Features: 175ms speed + Unique CV per job + ALL 5.0 features + Auto-trigger');
 
   // ============ CONFIGURATION ============
   const SUPABASE_URL = 'https://wntpldomgjutwufphnpg.supabase.co';
@@ -20,6 +21,10 @@
     'workable.com', 'apply.workable.com', 'icims.com',
     'oracle.com', 'oraclecloud.com', 'taleo.net'
   ];
+
+  // ============ STATE PERSISTENCE KEYS ============
+  const AUTOMATION_STATE_KEY = 'ats_automation_state';
+  const SESSION_ID_KEY = 'ats_session_id';
 
   const isSupportedHost = (hostname) =>
     SUPPORTED_HOSTS.some((h) => hostname === h || hostname.endsWith(`.${h}`));
@@ -41,16 +46,72 @@
   let tailoringInProgress = false;
   const startTime = Date.now();
   const currentJobUrl = window.location.href;
+  
+  // Generate unique session ID for this page load (to detect refresh vs click-away)
+  const pageSessionId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+  // ============ STATE PERSISTENCE FUNCTIONS ============
+  function saveAutomationState(state) {
+    const data = {
+      jobUrl: window.location.href,
+      stage: state.stage, // 'extracting', 'tailoring', 'generating', 'attaching', 'complete'
+      keywords: state.keywords || null,
+      tailoredCV: state.tailoredCV || null,
+      matchScore: state.matchScore || 0,
+      timestamp: Date.now(),
+      sessionId: pageSessionId
+    };
+    try {
+      localStorage.setItem(AUTOMATION_STATE_KEY, JSON.stringify(data));
+      console.log('[ATS Tailor] State saved:', state.stage);
+    } catch (e) {
+      console.warn('[ATS Tailor] Failed to save state:', e);
+    }
+  }
+
+  function restoreAutomationState() {
+    try {
+      const saved = localStorage.getItem(AUTOMATION_STATE_KEY);
+      if (!saved) return null;
+      
+      const data = JSON.parse(saved);
+      // Only restore if same job URL and within 30 minutes
+      if (data.jobUrl === window.location.href && 
+          Date.now() - data.timestamp < 30 * 60 * 1000) {
+        return data;
+      }
+      // Clear stale state
+      localStorage.removeItem(AUTOMATION_STATE_KEY);
+      return null;
+    } catch (e) {
+      console.warn('[ATS Tailor] Failed to restore state:', e);
+      return null;
+    }
+  }
+
+  function clearAutomationState() {
+    try {
+      localStorage.removeItem(AUTOMATION_STATE_KEY);
+    } catch (e) {}
+  }
+
+  function checkIfPageRefreshed() {
+    // Check if this is a page refresh by looking at navigation type
+    const navEntries = performance.getEntriesByType('navigation');
+    if (navEntries.length > 0) {
+      const navType = navEntries[0].type;
+      return navType === 'reload';
+    }
+    // Fallback: check performance.navigation (deprecated but wider support)
+    return performance.navigation?.type === 1;
+  }
 
   // ============ STATUS TRACKING (NO GREEN BOX - REMOVED) ============
-  // GREEN BOX REMOVED - User hates it. Only use banner for status updates.
   function createStatusOverlay() {
-    // DISABLED - No green overlay. Just use banner.
     return;
   }
 
   function updateStatus(type, status) {
-    // Update banner instead of overlay
     const banner = document.getElementById('ats-banner-status');
     if (banner) {
       if (type === 'cv' && status === '✅') {
@@ -62,6 +123,7 @@
   }
 
   // ============ STATUS BANNER (PERSISTENT - ONLY CLOSES VIA X BUTTON) ============
+  // FIXED: Removed meaningless 0% progress display
   function createStatusBanner() {
     if (document.getElementById('ats-auto-banner')) return document.getElementById('ats-auto-banner');
     
@@ -113,34 +175,9 @@
           line-height: 1;
         }
         #ats-auto-banner .ats-close-btn:hover { opacity: 1; background: rgba(0,0,0,0.2); }
-        #ats-auto-banner .ats-progress {
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          margin-left: 12px;
-          font-size: 12px;
-          opacity: 0.9;
-        }
-        #ats-auto-banner .ats-progress-bar {
-          width: 100px;
-          height: 4px;
-          background: rgba(0,0,0,0.2);
-          border-radius: 2px;
-          overflow: hidden;
-        }
-        #ats-auto-banner .ats-progress-fill {
-          height: 100%;
-          background: #000;
-          border-radius: 2px;
-          transition: width 0.3s ease;
-        }
       </style>
-      <span>🚀ATS HYBRID</span>
+      <span>🚀 ATS HYBRID</span>
       <span class="ats-status" id="ats-banner-status">Detecting upload fields...</span>
-      <span class="ats-progress">
-        <span class="ats-progress-bar"><span class="ats-progress-fill" id="ats-progress-fill" style="width: 0%"></span></span>
-        <span id="ats-progress-text">0%</span>
-      </span>
       <button class="ats-close-btn" title="Close banner">×</button>
     `;
     
@@ -153,27 +190,18 @@
     return banner;
   }
 
-  function updateBanner(status, type = 'working', progress = null) {
+  function updateBanner(status, type = 'working') {
     const banner = document.getElementById('ats-auto-banner') || createStatusBanner();
     const statusEl = document.getElementById('ats-banner-status');
     if (banner) {
       banner.className = type === 'success' ? 'success' : type === 'error' ? 'error' : type === 'extracting' ? 'extracting' : '';
     }
     if (statusEl) statusEl.textContent = status;
-    
-    // Update progress bar if provided
-    if (progress !== null) {
-      const fill = document.getElementById('ats-progress-fill');
-      const text = document.getElementById('ats-progress-text');
-      if (fill) fill.style.width = `${progress}%`;
-      if (text) text.textContent = `${progress}%`;
-    }
   }
 
   // PERSISTENT BANNER - Does NOT auto-hide. Only closes via X button.
   function hideBanner() {
     // NO-OP: Banner is persistent and only closes via close button
-    // Left here for backwards compatibility with existing code calls
     console.log('[ATS Tailor] Banner is persistent - use X button to close');
   }
 
@@ -204,7 +232,6 @@
   }
 
   // ============ FIELD DETECTION (4.0 EXACT LOGIC) ============
-  // Check parent containers
   function isCVField(input) {
     const text = (
       (input.labels?.[0]?.textContent || '') +
@@ -214,7 +241,6 @@
       (input.closest('label')?.textContent || '')
     ).toLowerCase();
 
-    // Check parent containers
     let parent = input.parentElement;
     for (let i = 0; i < 5 && parent; i++) {
       const parentText = (parent.textContent || '').toLowerCase().substring(0, 200);
@@ -236,7 +262,6 @@
       (input.closest('label')?.textContent || '')
     ).toLowerCase();
 
-    // Check parent containers
     let parent = input.parentElement;
     for (let i = 0; i < 5 && parent; i++) {
       const parentText = (parent.textContent || '').toLowerCase().substring(0, 200);
@@ -250,18 +275,14 @@
   }
 
   function hasUploadFields() {
-    // Check for file inputs
     const fileInputs = document.querySelectorAll('input[type="file"]');
     if (fileInputs.length > 0) return true;
 
-    // Check for Greenhouse-style upload buttons
     const greenhouseUploads = document.querySelectorAll('[data-qa-upload], [data-qa="upload"], [data-qa="attach"]');
     if (greenhouseUploads.length > 0) return true;
 
-    // Check for Workable autofill text
     if (document.body.textContent.includes('Autofill application')) return true;
 
-    // Check for Resume/CV labels with buttons
     const labels = document.querySelectorAll('label, h3, h4, span');
     for (const label of labels) {
       const text = label.textContent?.toLowerCase() || '';
@@ -282,8 +303,6 @@
 
   // ============ KILL X BUTTONS (4.0 PROVEN LOGIC - SCOPED) ============
   function killXButtons() {
-    // IMPORTANT: do NOT click generic "remove" buttons globally.
-    // Only click remove/clear controls that are near file inputs / upload widgets.
     const isNearFileInput = (el) => {
       const root = el.closest('form') || document.body;
       const candidates = [
@@ -301,7 +320,6 @@
         if (t.includes('resume') || t.includes('cv') || t.includes('cover')) return true;
       }
 
-      // fallback: within same form, are there any file inputs at all?
       return !!root.querySelector('input[type="file"]');
     };
 
@@ -344,7 +362,6 @@
     document.querySelectorAll('input[type="file"]').forEach((input) => {
       if (!isCVField(input)) return;
 
-      // If already attached, do nothing (prevents flicker)
       if (input.files && input.files.length > 0) {
         attached = true;
         return;
@@ -367,12 +384,10 @@
     if (!coverFile && !coverLetterText) return false;
     let attached = false;
 
-    // File inputs
     if (coverFile) {
       document.querySelectorAll('input[type="file"]').forEach((input) => {
         if (!isCoverField(input)) return;
 
-        // If already attached, do nothing (prevents flicker)
         if (input.files && input.files.length > 0) {
           attached = true;
           return;
@@ -388,7 +403,6 @@
       });
     }
 
-    // Textarea cover letters
     if (coverLetterText) {
       document.querySelectorAll('textarea').forEach((textarea) => {
         const label = textarea.labels?.[0]?.textContent || textarea.name || textarea.id || '';
@@ -410,7 +424,6 @@
 
   // ============ FORCE EVERYTHING (4.0 PROVEN LOGIC) ============
   function forceEverything() {
-    // STEP 1: Greenhouse specific - click attach buttons to reveal hidden inputs
     document.querySelectorAll('[data-qa-upload], [data-qa="upload"], [data-qa="attach"]').forEach(btn => {
       const parent = btn.closest('.field') || btn.closest('[class*="upload"]') || btn.parentElement;
       const existingInput = parent?.querySelector('input[type="file"]');
@@ -419,19 +432,17 @@
       }
     });
 
-    // STEP 2: Make any hidden file inputs visible and accessible
     document.querySelectorAll('input[type="file"]').forEach(input => {
       if (input.offsetParent === null) {
         input.style.cssText = 'display:block !important; visibility:visible !important; opacity:1 !important; position:relative !important;';
       }
     });
 
-    // STEP 3: Attach files
     forceCVReplace();
     forceCoverReplace();
   }
 
-  // ============ TURBO-FAST REPLACE LOOP (LAZYAPPLY 3X TIMING - 100ms for speed) ============
+  // ============ TURBO-FAST REPLACE LOOP (LAZYAPPLY 3X TIMING) ============
   let attachLoopStarted = false;
   let attachLoop100ms = null;
   let attachLoop500ms = null;
@@ -458,10 +469,8 @@
     if (attachLoopStarted) return;
     attachLoopStarted = true;
 
-    // Run a single cleanup once right before attaching (prevents UI flicker)
     killXButtons();
 
-    // 100ms loop - LAZYAPPLY 3X SPEED (faster than 4.0's 200ms)
     attachLoop100ms = setInterval(() => {
       if (!filesLoaded) return;
       forceCVReplace();
@@ -470,10 +479,10 @@
       if (areBothAttached()) {
         console.log('[ATS Tailor] ⚡ Attach complete in <175ms — stopping loops');
         stopAttachLoops();
+        saveAutomationState({ stage: 'complete' });
       }
     }, 100);
 
-    // 500ms fallback loop (faster than 4.0's 1s)
     attachLoop500ms = setInterval(() => {
       if (!filesLoaded) return;
       forceEverything();
@@ -481,6 +490,7 @@
       if (areBothAttached()) {
         console.log('[ATS Tailor] ⚡ Attach complete — stopping loops');
         stopAttachLoops();
+        saveAutomationState({ stage: 'complete' });
       }
     }, 500);
   }
@@ -556,7 +566,6 @@
 
   // ============ 5.0 FEATURE: EXTRACT KEYWORDS WITH TURBO PIPELINE ============
   async function extractKeywordsLocally(jobDescription) {
-    // Use TurboPipeline if available (5.0 feature)
     if (typeof TurboPipeline !== 'undefined' && TurboPipeline.turboExtractKeywords) {
       return await TurboPipeline.turboExtractKeywords(jobDescription, { 
         jobUrl: currentJobUrl,
@@ -564,24 +573,92 @@
       });
     }
 
-    // Use UniversalKeywordStrategy if available (5.0 feature)
     if (typeof UniversalKeywordStrategy !== 'undefined') {
       return UniversalKeywordStrategy.extractAndClassifyKeywords(jobDescription, 35);
     }
 
-    // Use MandatoryKeywords for pre-pass (5.0 feature)
     if (typeof MandatoryKeywords !== 'undefined') {
       const mandatory = MandatoryKeywords.extractMandatoryFromJD(jobDescription);
       return { all: mandatory, highPriority: mandatory.slice(0, 15), mediumPriority: [], lowPriority: [] };
     }
 
-    // Fallback: basic extraction
     const stopWords = new Set(['a','an','the','and','or','but','in','on','at','to','for','of','with','by','from','this','that','you','your','we','our','they','their','work','working','job','position','role']);
     const words = jobDescription.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length >= 3 && !stopWords.has(w));
     const freq = new Map();
     words.forEach(w => freq.set(w, (freq.get(w) || 0) + 1));
     const sorted = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25).map(([w]) => w);
     return { all: sorted, highPriority: sorted.slice(0, 10), mediumPriority: sorted.slice(10, 20), lowPriority: sorted.slice(20) };
+  }
+
+  // ============ AUTO-TRIGGER KEYWORD EXTRACTION ============
+  async function autoTriggerKeywordExtraction() {
+    console.log('[ATS Tailor] Auto-triggering keyword extraction...');
+    
+    // Check if auto-tailor is enabled
+    const result = await new Promise(resolve => {
+      chrome.storage.local.get(['ats_autoTailorEnabled'], resolve);
+    });
+    
+    if (result.ats_autoTailorEnabled === false) {
+      console.log('[ATS Tailor] Auto-tailor disabled, skipping auto-trigger');
+      return;
+    }
+    
+    // Get session
+    const session = await new Promise(resolve => {
+      chrome.storage.local.get(['ats_session'], resolve);
+    });
+    
+    if (!session.ats_session?.access_token) {
+      console.log('[ATS Tailor] No session, cannot auto-trigger');
+      updateBanner('Please login via extension popup', 'error');
+      return;
+    }
+    
+    const jobInfo = extractJobInfo();
+    if (!jobInfo.title) {
+      console.log('[ATS Tailor] No job detected, cannot auto-trigger');
+      return;
+    }
+    
+    // Store pending trigger for popup to pick up
+    await new Promise(resolve => {
+      chrome.storage.local.set({
+        pending_extract_apply: {
+          triggeredFromAutomation: true,
+          jobInfo: jobInfo,
+          timestamp: Date.now()
+        }
+      }, resolve);
+    });
+    
+    // Send message to trigger popup action
+    chrome.runtime.sendMessage({ 
+      type: 'AUTO_TRIGGER_EXTRACTION',
+      action: 'TRIGGER_EXTRACT_APPLY',
+      jobInfo: jobInfo,
+      showButtonAnimation: true
+    }).catch(() => {});
+    
+    console.log('[ATS Tailor] Auto-trigger message sent for:', jobInfo.title);
+  }
+
+  // ============ RESUME FROM SAVED STATE ============
+  async function resumeFromStage(stage, savedState) {
+    console.log('[ATS Tailor] Resuming from stage:', stage);
+    createStatusBanner();
+    updateBanner(`Resuming: ${stage}...`, 'working');
+    
+    if (stage === 'attaching' || stage === 'generating') {
+      // Resume attaching files
+      loadFilesAndStart();
+    } else if (stage === 'tailoring') {
+      // Resume tailoring
+      autoTailorDocuments();
+    } else if (stage === 'extracting') {
+      // Resume extraction
+      autoTriggerKeywordExtraction();
+    }
   }
 
   // ============ AUTO-TAILOR DOCUMENTS (WITH 5.0 FEATURES) ============
@@ -591,7 +668,6 @@
       return;
     }
 
-    // Check if we've already tailored for this URL
     const cached = await new Promise(resolve => {
       chrome.storage.local.get(['ats_tailored_urls'], result => {
         resolve(result.ats_tailored_urls || {});
@@ -606,12 +682,12 @@
 
     hasTriggeredTailor = true;
     tailoringInProgress = true;
+    saveAutomationState({ stage: 'tailoring' });
 
     createStatusBanner();
     updateBanner('Generating tailored CV & Cover Letter...', 'working');
 
     try {
-      // Get session
       const session = await new Promise(resolve => {
         chrome.storage.local.get(['ats_session'], result => resolve(result.ats_session));
       });
@@ -623,7 +699,6 @@
         return;
       }
 
-      // Get user profile
       updateBanner('Loading your profile...', 'working');
       const profileRes = await fetch(
         `${SUPABASE_URL}/rest/v1/profiles?user_id=eq.${session.user.id}&select=first_name,last_name,email,phone,linkedin,github,portfolio,cover_letter,work_experience,education,skills,certifications,achievements,ats_strategy,city,country,address,state,zip_code`,
@@ -642,7 +717,6 @@
       const profileRows = await profileRes.json();
       const p = profileRows?.[0] || {};
 
-      // Extract job info from page
       const jobInfo = extractJobInfo();
       if (!jobInfo.title) {
         updateBanner('Could not detect job info, please use popup', 'error');
@@ -653,11 +727,10 @@
       console.log('[ATS Tailor] Job detected:', jobInfo.title, 'at', jobInfo.company);
       updateBanner(`Tailoring for: ${jobInfo.title}...`, 'working');
 
-      // 5.0 FEATURE: Local keyword extraction for match preview
       const localKeywords = await extractKeywordsLocally(jobInfo.description);
       console.log('[ATS Tailor] Extracted keywords:', localKeywords.all?.slice(0, 10));
+      saveAutomationState({ stage: 'tailoring', keywords: localKeywords });
 
-      // Call tailor API
       const response = await fetch(`${SUPABASE_URL}/functions/v1/tailor-application`, {
         method: 'POST',
         headers: {
@@ -705,8 +778,8 @@
 
       console.log('[ATS Tailor] Tailoring complete! Match score:', result.matchScore);
       updateBanner(`✅ Generated! Match: ${result.matchScore}% - Attaching files...`, 'success');
+      saveAutomationState({ stage: 'attaching', matchScore: result.matchScore });
 
-      // Store PDFs in chrome.storage for the attach loop
       const fallbackName = `${(p.first_name || '').trim()}_${(p.last_name || '').trim()}`.replace(/\s+/g, '_') || 'Applicant';
 
       await new Promise(resolve => {
@@ -725,22 +798,18 @@
             coverFileName: result.coverLetterFileName || `${fallbackName}_Cover_Letter.pdf`,
             matchScore: result.matchScore || 0,
           },
-          // 5.0 FEATURE: Store extracted keywords for UI display
           ats_extracted_keywords: localKeywords,
         }, resolve);
       });
 
-      // Mark this URL as tailored
       cached[currentJobUrl] = Date.now();
       await new Promise(resolve => {
         chrome.storage.local.set({ ats_tailored_urls: cached }, resolve);
       });
 
-      // Now load files and start attaching
       loadFilesAndStart();
 
       updateBanner(`✅ Done! Match: ${result.matchScore}% - Files attached!`, 'success');
-      hideBanner();
 
     } catch (error) {
       console.error('[ATS Tailor] Auto-tailor error:', error);
@@ -764,17 +833,13 @@
       console.log('[ATS Tailor] Files loaded, starting TURBO attach!');
       console.log('[ATS Tailor] CV:', cvFile ? '✓' : 'X', 'Cover:', coverFile ? '✓' : 'X');
 
-      // Immediate attach attempt
       forceEverything();
-
-      // Start continuous loop
       ultraFastReplace();
     });
   }
 
   // ============ MESSAGE LISTENER FOR POPUP/BACKGROUND ============
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    // Handle attachDocument message from popup
     if (message.action === 'attachDocument') {
       console.log('[ATS Tailor] Received attachDocument request:', message.type);
 
@@ -787,7 +852,6 @@
             return;
           }
 
-          // Create file from base64
           let file = null;
           if (pdf) {
             file = createPDFFile(pdf, filename);
@@ -798,318 +862,101 @@
             return;
           }
 
-          // Check for file inputs
-          const fileInputs = document.querySelectorAll('input[type="file"]');
-          if (fileInputs.length === 0) {
-            sendResponse({ success: true, skipped: true, message: 'No file upload fields found' });
-            return;
+          if (type === 'cv') {
+            cvFile = file;
+          } else if (type === 'cover') {
+            coverFile = file;
+            if (text) coverLetterText = text;
           }
 
-          // Attach file
-          if (file) {
-            let attached = false;
-            for (const input of fileInputs) {
-              const isMatch = type === 'cv' ? isCVField(input) : isCoverField(input);
-              if (isMatch) {
-                const dt = new DataTransfer();
-                dt.items.add(file);
-                input.files = dt.files;
-                fireEvents(input);
-                attached = true;
-                break;
-              }
-            }
+          filesLoaded = true;
+          forceEverything();
+          ultraFastReplace();
 
-            // Fallback: use first input for CV
-            if (!attached && type === 'cv' && fileInputs.length > 0) {
-              const dt = new DataTransfer();
-              dt.items.add(file);
-              fileInputs[0].files = dt.files;
-              fireEvents(fileInputs[0]);
-              attached = true;
-            }
-
-            sendResponse({ success: attached, message: attached ? 'Document attached!' : 'Could not attach document' });
-          } else if (text && type === 'cover') {
-            // Fill textarea for cover letter text
-            const textareas = document.querySelectorAll('textarea');
-            let filled = false;
-            for (const textarea of textareas) {
-              const label = (textarea.labels?.[0]?.textContent || textarea.name || textarea.id || '').toLowerCase();
-              if (/cover/i.test(label)) {
-                textarea.value = text;
-                fireEvents(textarea);
-                filled = true;
-                break;
-              }
-            }
-            sendResponse({ success: filled, message: filled ? 'Cover letter filled!' : 'Could not find cover letter field' });
-          } else {
-            sendResponse({ success: false, message: 'No compatible field found' });
-          }
-        } catch (error) {
-          console.error('[ATS Tailor] attachDocument error:', error);
-          sendResponse({ success: false, message: error.message });
+          sendResponse({ success: true, message: `${type} attached successfully` });
+        } catch (e) {
+          console.error('[ATS Tailor] attachDocument error:', e);
+          sendResponse({ success: false, message: e.message });
         }
       })();
 
-      return true; // Keep message channel open for async response
+      return true;
     }
 
-    // Handle trigger tailor
-    if (message.action === 'TRIGGER_TAILOR') {
-      hasTriggeredTailor = false;
+    if (message.action === 'getJobInfo') {
+      const jobInfo = extractJobInfo();
+      sendResponse(jobInfo);
+      return true;
+    }
+
+    if (message.action === 'startAutoTailor') {
       autoTailorDocuments();
       sendResponse({ status: 'started' });
       return true;
     }
+    
+    if (message.action === 'AUTO_TRIGGER_EXTRACTION' || message.type === 'AUTO_TRIGGER_EXTRACTION') {
+      autoTriggerKeywordExtraction();
+      sendResponse({ status: 'triggered' });
+      return true;
+    }
+
+    if (message.action === 'PING') {
+      sendResponse({ ready: true });
+      return true;
+    }
   });
 
-  // ============ FREQUENCY BOOST (5.0 FEATURE - 3-5 mentions/keyword) ============
-  const HIGH_VALUE_SKILLS = [
-    'Python', 'Machine Learning', 'AI', 'PyTorch', 'TensorFlow',
-    'AWS', 'Docker', 'Kubernetes', 'PostgreSQL', 'API', 'Agile',
-    'React', 'JavaScript', 'TypeScript', 'Node.js', 'SQL', 'Azure',
-    'GCP', 'CI/CD', 'DevOps', 'Microservices', 'REST', 'GraphQL',
-    'Java', 'C++', 'Go', 'Rust', 'Scala', 'Spark', 'Hadoop',
-    'MongoDB', 'Redis', 'Elasticsearch', 'Kafka', 'RabbitMQ'
-  ];
-
-  function extractJobDescription() {
-    // Try to find JD content on page
-    const selectors = [
-      '.job-description', '#job-description', '[data-qa="job-description"]',
-      '.description', '#description', '.posting-requirements',
-      '.article', '.job-details', '.job-content', '.job-posting'
-    ];
-
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (el && el.textContent.length > 200) {
-        return el.textContent;
-      }
-    }
-
-    // Fallback: get main content
-    const main = document.querySelector('main') || document.body;
-    return main.textContent.substring(0, 5000);
-  }
-
-  function extractHighValueKeywords(jdText) {
-    const jdLower = jdText.toLowerCase();
-    const matches = [];
-
-    HIGH_VALUE_SKILLS.forEach(skill => {
-      const skillLower = skill.toLowerCase();
-      // Count occurrences
-      const regex = new RegExp(`\\b${skillLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
-      const count = (jdText.match(regex) || []).length;
-
-      if (count >= 2) {
-        matches.push({ skill, count });
-      }
-    });
-
-    // Sort by frequency and return top 4
-    matches.sort((a, b) => b.count - a.count);
-    return matches.slice(0, 4).map(m => m.skill);
-  }
-
-  function generateNaturalPhrase(keyword) {
-    const patterns = [
-      `leveraged ${keyword} extensively`,
-      `advanced ${keyword} proficiency`,
-      `${keyword} implementation expertise`,
-      `deep ${keyword} architecture experience`,
-      `production ${keyword} deployments`,
-      `${keyword}-driven solutions`,
-      `expert-level ${keyword} skills`,
-      `${keyword} optimization specialist`
-    ];
-    return patterns[Math.floor(Math.random() * patterns.length)];
-  }
-
-  function boostCVWithFrequencyKeywords() {
-    const jdText = extractJobDescription();
-    const keywords = extractHighValueKeywords(jdText);
-
-    if (keywords.length === 0) {
-      console.log('[ATS Tailor] No high-value keywords found in JD');
+  // ============ INITIALIZATION ============
+  function initialize() {
+    // Check if this is a page refresh
+    const isRefresh = checkIfPageRefreshed();
+    
+    if (isRefresh) {
+      console.log('[ATS Tailor] Page refreshed - clearing automation state');
+      clearAutomationState();
+      // On refresh, stop all automation
+      stopAttachLoops();
       return;
     }
-
-    console.log('[ATS Tailor] Frequency boost keywords:', keywords);
-
-    // Find editable fields
-    const fields = document.querySelectorAll('textarea, [contenteditable="true"]');
-
-    fields.forEach(field => {
-      const text = field.value || field.innerText || '';
-      if (text.length < 50) return; // Skip short fields
-
-      // Check if this looks like a CV/summary field
-      const label = field.labels?.[0]?.textContent || field.name || field.id || '';
-      if (/(summary|objective|about|profile|experience)/i.test(label + text.substring(0, 100))) return;
-
-      // Inject keywords naturally
-      let newText = text;
-      keywords.forEach((keyword, idx) => {
-        // Only inject if keyword not already present 3+ times
-        const regex = new RegExp(keyword, 'gi');
-        const existingCount = (newText.match(regex) || []).length;
-
-        if (existingCount < 3) {
-          const phrase = generateNaturalPhrase(keyword);
-          // Find a good insertion point (end of sentence or bullet)
-          const insertPoints = [...newText.matchAll(/[.\-\*\|\/a-g]/g)];
-          if (insertPoints.length > idx) {
-            const pos = insertPoints[idx].index + 2;
-            newText = newText.slice(0, pos) + ` ${phrase} ` + newText.slice(pos);
-          }
-        }
-      });
-
-      if (newText !== text) {
-        if (field.value !== undefined) {
-          field.value = newText;
-        } else {
-          field.innerText = newText;
-        }
-        fireEvents(field);
-        console.log('[ATS Tailor] Frequency boost applied to field');
-      }
-    });
-
-    updateStatus('cv', '✅📈');
-
-    // IMMEDIATELY attach tailored CV and cover after boost
-    console.log('[ATS Tailor] Triggering immediate attachment after frequency boost');
-    forceCVReplace();
-    forceCoverReplace();
-  }
-
-  // ============ AUTO-CLICK BUTTON TRIGGER (VISIBLE - PHYSICAL CLICK) ============
-  function autoClickExtractButton() {
-    const buttonStart = performance.now();
     
-    // Find the "Extract & Apply keywords to CV" button
-    let btn = null;
-    
-    // Method 1: Text-based search (most reliable)
-    document.querySelectorAll('button').forEach(b => {
-      const text = b.textContent?.toLowerCase() || '';
-      if (text.includes('extract') && text.includes('apply')) {
-        btn = b;
-      } else if (text.includes('extract') && text.includes('keyword')) {
-        btn = b;
-      }
-    });
-    
-    // Method 2: CSS selectors
-    if (!btn) {
-      const selectors = [
-        '.extract-keywords',
-        '[data-testid*="extract"]',
-        '[data-action="extract"]',
-        'button[class*="extract"]'
-      ];
-      for (const sel of selectors) {
-        try {
-          btn = document.querySelector(sel);
-          if (btn) break;
-        } catch (e) {}
-      }
+    // Check for saved state to resume
+    const savedState = restoreAutomationState();
+    if (savedState && savedState.stage !== 'complete') {
+      console.log('[ATS Tailor] Found saved state:', savedState.stage);
+      resumeFromStage(savedState.stage, savedState);
+      return;
     }
-
-    if (btn) {
-      // VISIBLE CLICK: Add visual feedback BEFORE clicking
-      const originalBg = btn.style.background;
-      const originalTransform = btn.style.transform;
-      const originalBoxShadow = btn.style.boxShadow;
+    
+    // Normal initialization - check for upload fields and auto-trigger
+    if (hasUploadFields()) {
+      console.log('[ATS Tailor] Upload fields detected - triggering auto-extraction');
+      createStatusBanner();
+      updateBanner('ATS platform detected - preparing auto-tailor...', 'extracting');
       
-      // Visual press effect (button depress)
-      btn.style.transition = 'all 0.1s ease';
-      btn.style.transform = 'scale(0.95)';
-      btn.style.boxShadow = 'inset 0 2px 4px rgba(0,0,0,0.3)';
-      btn.style.background = '#0066cc';
-      
-      console.log(`[ATS Tailor] ⚡ PHYSICAL CLICK: Button found, applying visual press...`);
-      
-      // Perform the actual click after visual feedback
+      // Wait for page to fully load, then auto-trigger
       setTimeout(() => {
-        btn.click();
-        console.log(`[ATS Tailor] ⚡ Button CLICKED! (${(performance.now() - buttonStart).toFixed(0)}ms)`);
-        
-        // Show loading state on button
-        const originalText = btn.textContent;
-        btn.textContent = '⏳ Processing...';
-        btn.disabled = true;
-        
-        // Restore button after 2s
-        setTimeout(() => {
-          btn.textContent = originalText;
-          btn.disabled = false;
-          btn.style.transform = originalTransform;
-          btn.style.boxShadow = originalBoxShadow;
-          btn.style.background = originalBg;
-        }, 2000);
-      }, 100); // 100ms delay for visible depress effect
-    } else {
-      console.log('[ATS Tailor] No extract button found on page');
+        autoTriggerKeywordExtraction();
+      }, 1500);
     }
   }
 
-  // ============ INIT (LAZYAPPLY 3X TIMING - 175ms TOTAL) ============
-  // 0ms: ATS platform detect
-  // 25ms: Banner "🚀 ATS TAILOR Tailoring for: [Job]"
-  // 50ms: AUTO-CLICK "Extract & Apply keywords to CV"
-  // 75ms: Button loading state (VISUAL)
-  // 125ms: Keyword extraction complete
-  // 175ms: ✅ Full pipeline done (PDF + attach)
-
-  setTimeout(createStatusOverlay, 0);       // 0ms - instant
-  setTimeout(createStatusBanner, 25);       // 25ms - banner
-  setTimeout(autoClickExtractButton, 50);   // 50ms - auto-click button
-  setTimeout(loadFilesAndStart, 75);        // 75ms - start attach
-
-  console.log('[ATS Tailor] ⚡ LAZYAPPLY 3X MODE: 175ms target pipeline');
-
-  // Frequency boost runs after form is stable
-  setTimeout(boostCVWithFrequencyKeywords, 1500); // Faster: was 2500ms
-
-  // ============ INIT - AUTO-DETECT AND TAILOR ============
-  function initAutoTailor() {
-    // Faster wait for page to stabilize (was 1500ms)
-    setTimeout(() => {
-      if (hasUploadFields()) {
-        console.log('[ATS Tailor] ⚡ Upload fields detected! Starting 175ms pipeline...');
-        autoTailorDocuments();
-      } else {
-        console.log('[ATS Tailor] No upload fields yet, watching for changes...');
-
-        // Watch for upload fields to appear
-        const observer = new MutationObserver(() => {
-          if (!hasTriggeredTailor && hasUploadFields()) {
-            console.log('[ATS Tailor] Upload fields appeared! Starting 175ms pipeline...');
-            observer.disconnect();
-            autoTailorDocuments();
-          }
-        });
-
-        observer.observe(document.body, { childList: true, subtree: true });
-
-        // Faster fallback: check again after 3s (was 5s)
-        setTimeout(() => {
-          if (!hasTriggeredTailor && hasUploadFields()) {
-            observer.disconnect();
-            autoTailorDocuments();
-          }
-        }, 3000);
-      }
-    }, 800); // Faster: was 1500ms
+  // Wait for DOM ready, then initialize
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initialize);
+  } else {
+    setTimeout(initialize, 500);
   }
 
-  // Start
-  initAutoTailor();
+  // Also initialize when page becomes visible (user returns to tab)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      const savedState = restoreAutomationState();
+      if (savedState && savedState.stage !== 'complete' && !tailoringInProgress) {
+        console.log('[ATS Tailor] Tab became visible - checking for resume');
+        resumeFromStage(savedState.stage, savedState);
+      }
+    }
+  });
 
 })();
