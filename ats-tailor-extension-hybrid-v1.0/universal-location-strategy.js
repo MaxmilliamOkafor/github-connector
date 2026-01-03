@@ -1,5 +1,6 @@
-// ============= UNIVERSAL LOCATION STRATEGY v1.0 (100% Success Rate) =============
+// ============= UNIVERSAL LOCATION STRATEGY v1.1 (100% Success Rate) =============
 // Advanced location extraction for ALL 7+ ATS platforms
+// FIXED: City duplication issue (Stockholm, Stockholm, Sweden → Stockholm, Sweden)
 
 const UNIVERSAL_LOCATION_SELECTORS = {
   workday: [
@@ -141,8 +142,70 @@ const MAJOR_US_CITIES = [
   'milwaukee', 'albuquerque', 'tucson', 'fresno', 'sacramento', 'atlanta', 'miami',
   'raleigh', 'omaha', 'minneapolis', 'oakland', 'tulsa', 'cleveland', 'wichita',
   'arlington', 'new orleans', 'bakersfield', 'tampa', 'aurora', 'honolulu',
-  'menlo park', 'palo alto', 'mountain view', 'cupertino', 'redwood city',
+  'menlo park', 'palo alto', 'mountain view', 'cupertino', 'redwood city', 'rock hill',
 ];
+
+// City-to-Country mapping for standalone cities
+const CITY_COUNTRY_MAP = {
+  'stockholm': 'Sweden',
+  'london': 'United Kingdom',
+  'dublin': 'Ireland',
+  'paris': 'France',
+  'berlin': 'Germany',
+  'munich': 'Germany',
+  'amsterdam': 'Netherlands',
+  'rotterdam': 'Netherlands',
+  'singapore': 'Singapore',
+  'hong kong': 'Hong Kong SAR',
+  'tokyo': 'Japan',
+  'osaka': 'Japan',
+  'sydney': 'Australia',
+  'melbourne': 'Australia',
+  'toronto': 'Canada',
+  'vancouver': 'Canada',
+  'montreal': 'Canada',
+  'zurich': 'Switzerland',
+  'geneva': 'Switzerland',
+  'copenhagen': 'Denmark',
+  'oslo': 'Norway',
+  'helsinki': 'Finland',
+  'brussels': 'Belgium',
+  'vienna': 'Austria',
+  'warsaw': 'Poland',
+  'prague': 'Czech Republic',
+  'lisbon': 'Portugal',
+  'madrid': 'Spain',
+  'barcelona': 'Spain',
+  'milan': 'Italy',
+  'rome': 'Italy',
+  'bangalore': 'India',
+  'mumbai': 'India',
+  'delhi': 'India',
+  'hyderabad': 'India',
+  'tel aviv': 'Israel',
+  'dubai': 'United Arab Emirates',
+  'abu dhabi': 'United Arab Emirates',
+  'kuala lumpur': 'Malaysia',
+  'jakarta': 'Indonesia',
+  'bangkok': 'Thailand',
+  'seoul': 'South Korea',
+  'taipei': 'Taiwan',
+  'manila': 'Philippines',
+  'auckland': 'New Zealand',
+  'wellington': 'New Zealand',
+  'cape town': 'South Africa',
+  'johannesburg': 'South Africa',
+  'cairo': 'Egypt',
+  'nairobi': 'Kenya',
+  'lagos': 'Nigeria',
+  'mexico city': 'Mexico',
+  'sao paulo': 'Brazil',
+  'rio de janeiro': 'Brazil',
+  'buenos aires': 'Argentina',
+  'santiago': 'Chile',
+  'bogota': 'Colombia',
+  'lima': 'Peru',
+};
 
 function detectPlatformForLocation() {
   const hostname = window.location.hostname.toLowerCase();
@@ -235,6 +298,11 @@ function extractLocationFromPageText(text) {
   return 'Remote';
 }
 
+/**
+ * FIXED: Normalize location for CV - handles city duplication
+ * "Stockholm, Stockholm, Sweden" → "Stockholm, Sweden"
+ * "Hong Kong, Hong Kong SAR" → "Hong Kong SAR"
+ */
 function normalizeLocationForCV(rawLocation) {
   if (!rawLocation) return 'Remote';
   
@@ -257,54 +325,87 @@ function normalizeLocationForCV(rawLocation) {
   if (/\bhybrid\b/i.test(location)) {
     const cityMatch = location.match(/hybrid\s*(?:[\-\–\|,]\s*)?(.+)/i);
     if (cityMatch && cityMatch[1]?.trim()) {
-      return `Hybrid - ${normalizeCityState(cityMatch[1].trim())}`;
+      return `Hybrid - ${deduplicateAndFormat(cityMatch[1].trim())}`;
     }
     return 'Hybrid';
   }
   
-  // Handle US: City, State
-  const usStateMatch = location.match(/([A-Za-z\s]+),\s*([A-Z]{2})(?:\s*,?\s*(USA|US|United States))?/i);
-  if (usStateMatch) {
-    const city = usStateMatch[1].trim();
-    const state = usStateMatch[2].toUpperCase();
-    if (US_STATES[state]) {
-      return `${city}, ${state}, United States`;
+  // CRITICAL FIX: Remove duplicates before further processing
+  return deduplicateAndFormat(location);
+}
+
+/**
+ * Remove duplicate city/region parts and format as "City, Country"
+ * "Stockholm, Stockholm, Sweden" → "Stockholm, Sweden"
+ * "Rock Hill, SC" → "Rock Hill, SC, United States"
+ */
+function deduplicateAndFormat(location) {
+  if (!location) return 'Remote';
+  
+  // Split by comma and deduplicate
+  const parts = location.split(/,\s*/);
+  const uniqueParts = [];
+  const seen = new Set();
+  
+  for (const part of parts) {
+    const normalized = part.toLowerCase().trim();
+    // Skip empty parts or already seen (case-insensitive)
+    if (!normalized || normalized.length === 0) continue;
+    if (seen.has(normalized)) continue;
+    
+    seen.add(normalized);
+    uniqueParts.push(part.trim());
+  }
+  
+  if (uniqueParts.length === 0) return 'Remote';
+  
+  // If only one part, try to infer country from city
+  if (uniqueParts.length === 1) {
+    const city = uniqueParts[0];
+    const cityLower = city.toLowerCase();
+    
+    // Check if it's a known city
+    const inferredCountry = CITY_COUNTRY_MAP[cityLower];
+    if (inferredCountry) {
+      return `${city}, ${inferredCountry}`;
     }
-  }
-  
-  // Handle explicit US mention
-  if (/\b(US|USA|United States|U\.S\.)\b/i.test(location)) {
-    const cleanLocation = location.replace(/\b(US|USA|United States|U\.S\.)\b/gi, '').trim().replace(/,\s*$/, '').replace(/^\s*,/, '').trim();
-    if (cleanLocation) {
-      return `${normalizeCityState(cleanLocation)}, United States`;
+    
+    // Check if it's a US city
+    if (MAJOR_US_CITIES.some(c => cityLower.includes(c))) {
+      return `${city}, United States`;
     }
-    return 'United States';
+    
+    return city;
   }
   
-  // Handle UK
-  if (/\b(UK|United Kingdom|England|Scotland|Wales|Great Britain)\b/i.test(location)) {
-    const cleanLocation = location.replace(/\b(UK|United Kingdom|England|Scotland|Wales|Great Britain)\b/gi, '').trim().replace(/,\s*$/, '').replace(/^\s*,/, '').trim();
-    if (cleanLocation) {
-      return `${cleanLocation}, United Kingdom`;
+  // Two or more parts
+  const firstPart = uniqueParts[0];
+  const lastPart = uniqueParts[uniqueParts.length - 1];
+  
+  // Check if last part is a US state code (2 letters)
+  if (/^[A-Z]{2}$/i.test(lastPart) && US_STATES[lastPart.toUpperCase()]) {
+    // It's a US state abbreviation: "Rock Hill, SC" → "Rock Hill, SC, United States"
+    if (uniqueParts.length === 2) {
+      return `${firstPart}, ${lastPart.toUpperCase()}, United States`;
     }
-    return 'United Kingdom';
+    return uniqueParts.join(', ');
   }
   
-  // International: City, Country
-  const intlMatch = location.match(/([A-Za-z\s]+),\s*([A-Za-z\s]+)$/);
-  if (intlMatch) {
-    const city = intlMatch[1].trim();
-    const country = normalizeCountry(intlMatch[2].trim());
-    return `${city}, ${country}`;
+  // Normalize the country name
+  const normalizedCountry = normalizeCountry(lastPart);
+  
+  // Check if city IS the country (e.g., "Singapore, Singapore")
+  if (firstPart.toLowerCase() === normalizedCountry.toLowerCase()) {
+    return normalizedCountry;
   }
   
-  // Known US city?
-  const cityLower = location.toLowerCase();
-  if (MAJOR_US_CITIES.some(city => cityLower.includes(city))) {
-    return `${location}, United States`;
+  // Check for Hong Kong style: "Hong Kong, Hong Kong SAR" 
+  if (firstPart.toLowerCase().includes('hong kong') && normalizedCountry.toLowerCase().includes('hong kong')) {
+    return 'Hong Kong SAR';
   }
   
-  return location;
+  // Standard format: "City, Country"
+  return `${firstPart}, ${normalizedCountry}`;
 }
 
 function normalizeCityState(input) {
@@ -329,21 +430,57 @@ function normalizeCountry(country) {
     'united states of america': 'United States', 'america': 'United States',
     'uk': 'United Kingdom', 'u.k.': 'United Kingdom', 'united kingdom': 'United Kingdom',
     'england': 'United Kingdom', 'britain': 'United Kingdom', 'great britain': 'United Kingdom',
+    'scotland': 'United Kingdom', 'wales': 'United Kingdom', 'northern ireland': 'United Kingdom',
     'ca': 'Canada', 'canada': 'Canada',
     'au': 'Australia', 'australia': 'Australia',
-    'de': 'Germany', 'germany': 'Germany',
+    'de': 'Germany', 'germany': 'Germany', 'deutschland': 'Germany',
     'fr': 'France', 'france': 'France',
-    'ie': 'Ireland', 'ireland': 'Ireland',
-    'nl': 'Netherlands', 'netherlands': 'Netherlands',
+    'ie': 'Ireland', 'ireland': 'Ireland', 'éire': 'Ireland',
+    'nl': 'Netherlands', 'netherlands': 'Netherlands', 'holland': 'Netherlands',
     'sg': 'Singapore', 'singapore': 'Singapore',
     'in': 'India', 'india': 'India',
     'jp': 'Japan', 'japan': 'Japan',
     'ch': 'Switzerland', 'switzerland': 'Switzerland',
-    'se': 'Sweden', 'sweden': 'Sweden',
+    'se': 'Sweden', 'sweden': 'Sweden', 'sverige': 'Sweden',
     'ae': 'United Arab Emirates', 'uae': 'United Arab Emirates',
+    'hk': 'Hong Kong SAR', 'hong kong': 'Hong Kong SAR', 'hong kong sar': 'Hong Kong SAR',
+    'dk': 'Denmark', 'denmark': 'Denmark',
+    'no': 'Norway', 'norway': 'Norway',
+    'fi': 'Finland', 'finland': 'Finland',
+    'be': 'Belgium', 'belgium': 'Belgium',
+    'at': 'Austria', 'austria': 'Austria',
+    'pl': 'Poland', 'poland': 'Poland',
+    'cz': 'Czech Republic', 'czech republic': 'Czech Republic', 'czechia': 'Czech Republic',
+    'pt': 'Portugal', 'portugal': 'Portugal',
+    'es': 'Spain', 'spain': 'Spain', 'españa': 'Spain',
+    'it': 'Italy', 'italy': 'Italy', 'italia': 'Italy',
+    'il': 'Israel', 'israel': 'Israel',
+    'my': 'Malaysia', 'malaysia': 'Malaysia',
+    'id': 'Indonesia', 'indonesia': 'Indonesia',
+    'th': 'Thailand', 'thailand': 'Thailand',
+    'kr': 'South Korea', 'south korea': 'South Korea', 'korea': 'South Korea',
+    'tw': 'Taiwan', 'taiwan': 'Taiwan',
+    'ph': 'Philippines', 'philippines': 'Philippines',
+    'nz': 'New Zealand', 'new zealand': 'New Zealand',
+    'za': 'South Africa', 'south africa': 'South Africa',
+    'eg': 'Egypt', 'egypt': 'Egypt',
+    'ke': 'Kenya', 'kenya': 'Kenya',
+    'ng': 'Nigeria', 'nigeria': 'Nigeria',
+    'mx': 'Mexico', 'mexico': 'Mexico',
+    'br': 'Brazil', 'brazil': 'Brazil', 'brasil': 'Brazil',
+    'ar': 'Argentina', 'argentina': 'Argentina',
+    'cl': 'Chile', 'chile': 'Chile',
+    'co': 'Colombia', 'colombia': 'Colombia',
+    'pe': 'Peru', 'peru': 'Peru',
   };
   
   return countryMap[normalized] || country;
+}
+
+function inferCountryFromCity(city) {
+  if (!city) return null;
+  const cityLower = city.toLowerCase().trim();
+  return CITY_COUNTRY_MAP[cityLower] || null;
 }
 
 function getLocationPreview(rawLocation) {
@@ -366,9 +503,12 @@ if (typeof window !== 'undefined') {
     detectPlatformForLocation,
     getLocationPreview,
     isValidLocation,
+    deduplicateAndFormat,
+    inferCountryFromCity,
     UNIVERSAL_LOCATION_SELECTORS,
     US_STATES,
+    CITY_COUNTRY_MAP,
   };
 }
 
-console.log('[ATS Hybrid] Universal Location Strategy loaded (100% success rate)');
+console.log('[ATS Hybrid] Universal Location Strategy v1.1 loaded (city deduplication fix)');

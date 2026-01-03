@@ -1,6 +1,6 @@
-// pdf-ats-turbo.js - 100% ATS-Parseable PDF Generator (≤62ms for LazyApply 3X)
+// pdf-ats-turbo.js - 100% ATS-Parseable PDF Generator v1.1 (≤62ms for LazyApply 3X)
 // PERFECT FORMAT: Arial 10.5pt, 0.75" margins, 1.15 line height, UTF-8 text-only
-// CLEAN SKILLS SECTION - No keyword injection to avoid recruiter stuffing flags
+// FIXED: Skills section formatting, no ALL CAPS skills, proper text wrapping, removed tech proficiencies spam
 
 (function() {
   'use strict';
@@ -33,8 +33,15 @@
     },
 
     // ============ CORE TECHNICAL SKILLS (MAX 20, NO JOB KEYWORDS) ============
-    // These are the candidate's actual skills - NEVER modified by job keywords
     CORE_SKILLS_LIMIT: 20,
+
+    // ============ SOFT SKILLS TO EXCLUDE FROM DISPLAY ============
+    EXCLUDED_SOFT_SKILLS: new Set([
+      'good learning', 'communication skills', 'love for technology', 
+      'able to withstand work pressure', 'system integration', 'collaboration',
+      'problem-solving', 'teamwork', 'leadership', 'initiative', 'ownership',
+      'passion', 'dedication', 'motivation', 'self-starter'
+    ]),
 
     // ============ GENERATE ATS-PERFECT CV PDF (≤62ms for LazyApply 3X) ============
     async generateATSPerfectCV(candidateData, tailoredCV, jobData, workExperienceKeywords = []) {
@@ -94,21 +101,25 @@
       // EXPERIENCE - Already has keywords injected from tailorCV
       sections.experience = parsed.experience || '';
       
-      // SKILLS - CLEAN: Max 20 core skills, comma-separated, NO job keywords
+      // SKILLS - FIXED: Proper formatting, no ALL CAPS, comma-separated
       sections.skills = this.formatCleanSkillsSection(parsed.skills);
       
-      // EDUCATION
-      sections.education = parsed.education || '';
+      // EDUCATION - FIXED: Compact single-line format
+      sections.education = this.formatEducationSection(parsed.education);
       
-      // CERTIFICATIONS
-      sections.certifications = parsed.certifications || '';
+      // CERTIFICATIONS - FIXED: Comma-separated, no bullet spam
+      sections.certifications = this.formatCertificationsSection(parsed.certifications);
       
-      // TECHNICAL PROFICIENCIES - CRITICAL: Include for PDF = Preview match
-      // This section contains soft skills like collaboration, problem-solving
-      sections.technicalProficiencies = parsed.technicalProficiencies || '';
-      
-      console.log('[PDFATSTurbo] formatCVForATS - Technical Proficiencies:', 
-        sections.technicalProficiencies ? sections.technicalProficiencies.substring(0, 80) : 'NONE');
+      // REMOVED: Technical Proficiencies section (was showing soft skills spam)
+      // If meaningful proficiencies exist, merge them into skills
+      if (parsed.technicalProficiencies) {
+        const meaningfulProfs = this.extractMeaningfulProficiencies(parsed.technicalProficiencies);
+        if (meaningfulProfs && sections.skills) {
+          sections.skills = sections.skills + ', ' + meaningfulProfs;
+        }
+      }
+
+      console.log('[PDFATSTurbo] formatCVForATS - sections formatted');
 
       return sections;
     },
@@ -122,17 +133,21 @@
       const email = candidateData?.email || '';
       const linkedin = candidateData?.linkedin || '';
       const github = candidateData?.github || '';
-      const location = candidateData?.city || candidateData?.location || 'Open to relocation';
+      
+      // Use location tailor if available
+      let location = candidateData?.city || candidateData?.location || 'Open to relocation';
+      if (typeof window !== 'undefined' && window.ATSLocationTailor) {
+        location = window.ATSLocationTailor.normalizeLocationForCV(location);
+      }
 
       return {
         name,
-        contactLine: [phone, email, location].filter(Boolean).join(' | '),
+        contactLine: [phone, email, location, 'open to relocation'].filter(Boolean).join(' | '),
         linksLine: [linkedin, github].filter(Boolean).join(' | ')
       };
     },
 
-    // ============ PARSE CV SECTIONS (INCLUDES TECHNICAL PROFICIENCIES) ============
-    // CRITICAL FIX: Ensure TECHNICAL PROFICIENCIES section is captured for PDF = Preview match
+    // ============ PARSE CV SECTIONS ============
     parseCVSections(cvText) {
       if (!cvText) return {};
       
@@ -142,10 +157,9 @@
         skills: '',
         education: '',
         certifications: '',
-        technicalProficiencies: '' // CRITICAL: Include this section for PDF = Preview match
+        technicalProficiencies: ''
       };
 
-      // IMPROVED: More robust section parsing using line-by-line approach
       const lines = cvText.split('\n');
       let currentSection = '';
       let currentContent = [];
@@ -173,7 +187,6 @@
         const trimmed = line.trim().toUpperCase().replace(/[:\s]+$/, '');
         
         if (sectionHeaders[trimmed]) {
-          // Save previous section content
           if (currentSection && currentContent.length > 0) {
             sections[currentSection] = currentContent.join('\n').trim();
           }
@@ -184,51 +197,152 @@
         }
       }
       
-      // Save last section
       if (currentSection && currentContent.length > 0) {
         sections[currentSection] = currentContent.join('\n').trim();
       }
-      
-      // FALLBACK: Use regex for any missed sections (especially TECHNICAL PROFICIENCIES)
-      if (!sections.technicalProficiencies) {
-        const techProfMatch = cvText.match(/TECHNICAL\s*PROFICIENCIES[\s:]*\n?([\s\S]*?)(?=\n[A-Z]{3,}|$)/i);
-        if (techProfMatch) {
-          sections.technicalProficiencies = techProfMatch[1].trim();
-        }
-      }
-
-      console.log('[PDFATSTurbo] Parsed sections:', Object.keys(sections).filter(k => sections[k]));
-      console.log('[PDFATSTurbo] Technical Proficiencies content:', sections.technicalProficiencies?.substring(0, 100) || 'NONE');
 
       return sections;
     },
 
     // ============ FORMAT CLEAN SKILLS SECTION ============
-    // CRITICAL: NO job keyword injection - only core technical skills
+    // FIXED: No ALL CAPS, proper Title Case, comma-separated, max 20 skills
     formatCleanSkillsSection(skillsText) {
       if (!skillsText) return '';
-      
-      // Extract existing skills only
-      const existingSkills = [];
       
       // Parse comma-separated, bullet points, or line-separated skills
       const skillWords = skillsText
         .replace(/[•\-*]/g, ',')
         .split(/[,\n]/)
         .map(s => s.trim())
-        .filter(s => s.length >= 2 && s.length <= 50);
+        .filter(s => {
+          if (s.length < 2 || s.length > 40) return false;
+          // Filter out soft skills
+          if (this.EXCLUDED_SOFT_SKILLS.has(s.toLowerCase())) return false;
+          return true;
+        });
       
+      // Deduplicate
+      const uniqueSkills = [];
+      const seen = new Set();
       skillWords.forEach(s => {
-        if (!existingSkills.includes(s)) {
-          existingSkills.push(s);
+        const lower = s.toLowerCase();
+        if (!seen.has(lower)) {
+          seen.add(lower);
+          // Proper Title Case (not ALL CAPS)
+          const formatted = s.split(' ').map(word => {
+            // Keep acronyms uppercase (AWS, SQL, etc.)
+            if (word.length <= 4 && word === word.toUpperCase()) {
+              return word;
+            }
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+          }).join(' ');
+          uniqueSkills.push(formatted);
         }
       });
       
       // Limit to MAX 20 core technical skills
-      const coreSkills = existingSkills.slice(0, this.CORE_SKILLS_LIMIT);
+      const coreSkills = uniqueSkills.slice(0, this.CORE_SKILLS_LIMIT);
       
-      // Return comma-separated, single line, Arial 10pt format
+      // Return comma-separated
       return coreSkills.join(', ');
+    },
+
+    // ============ FORMAT EDUCATION SECTION ============
+    // FIXED: Compact single-line format per degree
+    formatEducationSection(educationText) {
+      if (!educationText) return '';
+      
+      const lines = educationText.split('\n').filter(l => l.trim());
+      const formattedLines = [];
+      
+      let currentEntry = [];
+      
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        
+        // Check if this is a new institution (usually starts with uppercase, not a date)
+        const isInstitution = /^[A-Z][a-zA-Z\s]+(?:University|College|Institute|School)/.test(trimmed) ||
+                             /^[A-Z][a-zA-Z\s]+$/.test(trimmed) && trimmed.length > 10;
+        
+        if (isInstitution && currentEntry.length > 0) {
+          // Save previous entry
+          formattedLines.push(this.formatEducationEntry(currentEntry));
+          currentEntry = [trimmed];
+        } else {
+          currentEntry.push(trimmed);
+        }
+      }
+      
+      // Save last entry
+      if (currentEntry.length > 0) {
+        formattedLines.push(this.formatEducationEntry(currentEntry));
+      }
+      
+      return formattedLines.join('\n');
+    },
+
+    formatEducationEntry(lines) {
+      // Try to combine into: "Institution | Degree | Date | GPA"
+      let institution = '';
+      let degree = '';
+      let date = '';
+      let gpa = '';
+      
+      for (const line of lines) {
+        if (/GPA|Grade/i.test(line)) {
+          const gpaMatch = line.match(/(?:GPA|Grade)[:\s]*(\d+\.?\d*)/i);
+          if (gpaMatch) gpa = `GPA: ${gpaMatch[1]}`;
+        } else if (/\d{4}/.test(line) && /[-–]/.test(line)) {
+          date = line.replace(/\|/g, '').trim();
+        } else if (/Bachelor|Master|PhD|Doctor|Associate|Diploma|Certificate/i.test(line)) {
+          degree = line.replace(/\|/g, '').trim();
+        } else if (line.length > 5) {
+          if (!institution) institution = line;
+          else if (!degree) degree = line;
+        }
+      }
+      
+      // Combine into single line
+      const parts = [institution, degree, date, gpa].filter(Boolean);
+      return parts.join(' | ');
+    },
+
+    // ============ FORMAT CERTIFICATIONS SECTION ============
+    // FIXED: Comma-separated, no bullet spam
+    formatCertificationsSection(certsText) {
+      if (!certsText) return '';
+      
+      const certs = certsText
+        .replace(/[•\-*]/g, ',')
+        .split(/[,\n]/)
+        .map(s => s.trim())
+        .filter(s => s.length > 5 && s.length < 100);
+      
+      // Return comma-separated
+      return certs.join(', ');
+    },
+
+    // ============ EXTRACT MEANINGFUL PROFICIENCIES ============
+    // Filter out soft skills spam, keep only technical proficiencies
+    extractMeaningfulProficiencies(profsText) {
+      if (!profsText) return '';
+      
+      const items = profsText
+        .replace(/[•\-*]/g, ',')
+        .split(/[,\n]/)
+        .map(s => s.trim())
+        .filter(s => {
+          if (s.length < 3 || s.length > 50) return false;
+          // Filter out soft skills
+          const lower = s.toLowerCase();
+          if (this.EXCLUDED_SOFT_SKILLS.has(lower)) return false;
+          // Keep technical terms only
+          if (/communication|learning|love|passion|pressure|integrity|attitude/i.test(s)) return false;
+          return true;
+        });
+      
+      return items.length > 0 ? items.join(', ') : '';
     },
 
     // ============ BUILD PDF TEXT (UTF-8) ============
@@ -252,15 +366,8 @@
       
       // EXPERIENCE
       if (sections.experience) {
-        lines.push('EXPERIENCE');
+        lines.push('WORK EXPERIENCE');
         lines.push(sections.experience);
-        lines.push('');
-      }
-      
-      // SKILLS (clean, comma-separated)
-      if (sections.skills) {
-        lines.push('SKILLS');
-        lines.push(sections.skills);
         lines.push('');
       }
       
@@ -271,26 +378,20 @@
         lines.push('');
       }
       
-      // CERTIFICATIONS
-      if (sections.certifications) {
-        lines.push('CERTIFICATIONS');
-        lines.push(sections.certifications);
+      // SKILLS (clean, comma-separated, proper case)
+      if (sections.skills) {
+        lines.push('SKILLS');
+        lines.push(sections.skills);
         lines.push('');
       }
       
-      // TECHNICAL PROFICIENCIES (CRITICAL: Include for PDF = Preview match)
-      // This section contains soft skills like collaboration, problem-solving
-      if (sections.technicalProficiencies) {
-        lines.push('');
-        lines.push('TECHNICAL PROFICIENCIES');
-        // Clean the bullet format for consistent display
-        const cleanedProficiencies = sections.technicalProficiencies
-          .replace(/^[•\-\*]\s*/gm, '• ')
-          .replace(/\s+•\s+/g, ' • ')
-          .trim();
-        lines.push(cleanedProficiencies);
-        console.log('[PDFATSTurbo] Added TECHNICAL PROFICIENCIES to PDF:', cleanedProficiencies.substring(0, 100));
+      // CERTIFICATIONS (comma-separated)
+      if (sections.certifications) {
+        lines.push('CERTIFICATIONS');
+        lines.push(sections.certifications);
       }
+      
+      // NOTE: Technical Proficiencies section REMOVED (was soft skills spam)
       
       return lines.join('\n');
     },
@@ -299,7 +400,7 @@
     async generateWithJsPDF(sections, candidateData) {
       const { jsPDF } = jspdf;
       const { font, fontSize, margins, lineHeight, pageWidth, pageHeight } = this.CONFIG;
-      const contentWidth = pageWidth - margins.left - margins.right;
+      const contentWidth = pageWidth - margins.left - margins.right - 10; // Safety margin
       
       const doc = new jsPDF({
         format: 'a4',
@@ -310,27 +411,34 @@
       doc.setFont(font, 'normal');
       let yPos = margins.top;
 
-      // Helper: Add text with word wrap
+      // Helper: Add text with proper word wrap and page breaks
       const addText = (text, isBold = false, isCentered = false, size = fontSize.body) => {
         doc.setFontSize(size);
         doc.setFont(font, isBold ? 'bold' : 'normal');
         
         const lines = doc.splitTextToSize(text, contentWidth);
         lines.forEach(line => {
-          if (yPos > pageHeight - margins.bottom - 20) {
+          // Check for page break BEFORE drawing
+          if (yPos > pageHeight - margins.bottom - 30) {
             doc.addPage();
             yPos = margins.top;
           }
           
           const xPos = isCentered ? (pageWidth - doc.getTextWidth(line)) / 2 : margins.left;
           doc.text(line, xPos, yPos);
-          yPos += size * lineHeight;
+          yPos += size * lineHeight + 2; // Proper line spacing
         });
       };
 
-      // Helper: Add section header (ALL CAPS, BOLD)
+      // Helper: Add section header
       const addSectionHeader = (title) => {
-        yPos += 8;
+        // Check for page break
+        if (yPos > pageHeight - margins.bottom - 50) {
+          doc.addPage();
+          yPos = margins.top;
+        }
+        
+        yPos += 10;
         doc.setFontSize(fontSize.sectionTitle);
         doc.setFont(font, 'bold');
         doc.text(title.toUpperCase(), margins.left, yPos);
@@ -340,7 +448,7 @@
         doc.setDrawColor(0);
         doc.setLineWidth(0.5);
         doc.line(margins.left, yPos - 3, pageWidth - margins.right, yPos - 3);
-        yPos += 6;
+        yPos += 8;
       };
 
       // NAME (centered, larger)
@@ -354,42 +462,46 @@
       if (sections.contact.linksLine) {
         addText(sections.contact.linksLine, false, true, fontSize.small);
       }
-      yPos += 10;
+      yPos += 12;
 
-      // PROFESSIONAL SUMMARY - Header BOLD, content NORMAL
+      // PROFESSIONAL SUMMARY
       if (sections.summary) {
         addSectionHeader('PROFESSIONAL SUMMARY');
-        // CRITICAL FIX: Summary content is NEVER bold
         doc.setFont(font, 'normal');
         addText(sections.summary, false, false, fontSize.body);
       }
 
-      // EXPERIENCE - FIXED FORMATTING
-      // BOLD: Company names only (e.g., "Meta | Senior Software Engineer")
-      // NORMAL: Dates, locations, bullet points, all other content
+      // WORK EXPERIENCE
       if (sections.experience) {
-        addSectionHeader('EXPERIENCE');
+        addSectionHeader('WORK EXPERIENCE');
         const expLines = sections.experience.split('\n');
+        
         expLines.forEach(line => {
           const trimmed = line.trim();
-          if (!trimmed) return;
+          if (!trimmed) {
+            yPos += 4; // Small gap for empty lines
+            return;
+          }
           
           // Bullet points - ALWAYS normal weight
           if (trimmed.startsWith('-') || trimmed.startsWith('•') || trimmed.startsWith('*')) {
             doc.setFont(font, 'normal');
             addText(trimmed, false, false, fontSize.body);
           }
-          // Company/Role line - ONLY bold if it looks like "Company | Role" or "Company Name"
-          // Pattern: Contains pipe OR is a company name (short, no bullet, not a date line)
+          // Company/Role line - BOLD
           else if (trimmed.includes('|') && !trimmed.match(/^\d{4}/)) {
-            // This is a "Company | Role" line - make it BOLD
             doc.setFont(font, 'bold');
             addText(trimmed, true, false, fontSize.body);
           }
-          // Date/Location lines - NORMAL (e.g., "2023-01 - Present" or "London, UK")
-          else if (trimmed.match(/^\d{4}/) || trimmed.match(/^[A-Z][a-z]+,\s*[A-Z]/)) {
+          // Date/Location lines - NORMAL, slightly smaller
+          else if (trimmed.match(/^\d{4}/) || trimmed.match(/^[A-Z][a-z]+\s+\d{4}/)) {
             doc.setFont(font, 'normal');
-            addText(trimmed, false, false, fontSize.body);
+            addText(trimmed, false, false, fontSize.small);
+          }
+          // Company names on their own line
+          else if (trimmed.match(/^[A-Z][A-Za-z\s]+$/) && trimmed.length < 50 && !trimmed.includes('-')) {
+            doc.setFont(font, 'bold');
+            addText(trimmed, true, false, fontSize.body);
           }
           // Everything else - NORMAL
           else {
@@ -399,36 +511,28 @@
         });
       }
 
-      // SKILLS (comma-separated, single line, NO keyword injection)
+      // EDUCATION - Compact format
+      if (sections.education) {
+        addSectionHeader('EDUCATION');
+        const eduLines = sections.education.split('\n').filter(l => l.trim());
+        eduLines.forEach(line => {
+          addText(line.trim(), false, false, fontSize.body);
+        });
+      }
+
+      // SKILLS (comma-separated, proper case, NO ALL CAPS)
       if (sections.skills) {
         addSectionHeader('SKILLS');
         addText(sections.skills, false, false, fontSize.body);
       }
 
-      // EDUCATION
-      if (sections.education) {
-        addSectionHeader('EDUCATION');
-        addText(sections.education, false, false, fontSize.body);
-      }
-
-      // CERTIFICATIONS
+      // CERTIFICATIONS (comma-separated)
       if (sections.certifications) {
         addSectionHeader('CERTIFICATIONS');
         addText(sections.certifications, false, false, fontSize.body);
       }
 
-      // TECHNICAL PROFICIENCIES (CRITICAL: Include for PDF = Preview match)
-      // This section contains soft skills like collaboration, problem-solving
-      if (sections.technicalProficiencies) {
-        addSectionHeader('TECHNICAL PROFICIENCIES');
-        // Format with bullets properly
-        const cleanedProficiencies = sections.technicalProficiencies
-          .replace(/^[•\-\*]\s*/gm, '• ')
-          .replace(/\s+•\s+/g, ' • ')
-          .trim();
-        addText(cleanedProficiencies, false, false, fontSize.body);
-        console.log('[PDFATSTurbo] Rendered TECHNICAL PROFICIENCIES in jsPDF:', cleanedProficiencies.substring(0, 100));
-      }
+      // NOTE: Technical Proficiencies section REMOVED
 
       const base64 = doc.output('datauristring').split(',')[1];
       const blob = doc.output('blob');
@@ -447,7 +551,7 @@
       formattedCoverLetter = formattedCoverLetter.replace(/To\s+Whom\s+It\s+May\s+Concern,?/gi, 'Dear Hiring Manager,');
       formattedCoverLetter = formattedCoverLetter.replace(/Dear\s+Recruiter,?/gi, 'Dear Hiring Manager,');
       
-      // Generate filename: {FirstName}_{LastName}_Cover_Letter.pdf
+      // Generate filename
       const firstName = (candidateData?.firstName || candidateData?.first_name || 'Applicant').replace(/\s+/g, '_');
       const lastName = (candidateData?.lastName || candidateData?.last_name || '').replace(/\s+/g, '_');
       const fileName = lastName ? `${firstName}_${lastName}_Cover_Letter.pdf` : `${firstName}_Cover_Letter.pdf`;
@@ -458,7 +562,7 @@
       if (typeof jspdf !== 'undefined' && jspdf.jsPDF) {
         const { jsPDF } = jspdf;
         const { font, fontSize, margins, lineHeight, pageWidth, pageHeight } = this.CONFIG;
-        const contentWidth = pageWidth - margins.left - margins.right;
+        const contentWidth = pageWidth - margins.left - margins.right - 10;
         
         const doc = new jsPDF({ format: 'a4', unit: 'pt' });
         doc.setFont(font, 'normal');
@@ -476,14 +580,14 @@
         paragraphs.forEach(para => {
           const lines = doc.splitTextToSize(para.trim(), contentWidth);
           lines.forEach(line => {
-            if (yPos > pageHeight - margins.bottom - 20) {
+            if (yPos > pageHeight - margins.bottom - 30) {
               doc.addPage();
               yPos = margins.top;
             }
             doc.text(line, margins.left, yPos);
-            yPos += fontSize.body * lineHeight;
+            yPos += fontSize.body * lineHeight + 2;
           });
-          yPos += 10;
+          yPos += 12;
         });
 
         pdfBase64 = doc.output('datauristring').split(',')[1];
@@ -508,4 +612,6 @@
 
   // Export to global scope
   window.PDFATSTurbo = PDFATSTurbo;
+  
+  console.log('[ATS Hybrid] PDFATSTurbo v1.1 loaded (fixed formatting)');
 })();
